@@ -310,9 +310,10 @@ defmodule Redix.PubSub.Connection do
   defp handle_pubsub_msg(%{subscriptions: subscriptions} = state, ["message", channel, payload]) do
     message = message(:message, %{channel: channel, payload: payload})
 
-    subscriptions
-    |> Map.fetch!({:channel, channel})
-    |> Enum.each(fn {subscriber, _monitor} -> send(subscriber, message) end)
+    case Map.fetch(subscriptions, {:channel, channel}) do
+      {:ok, users} -> Enum.each(users, fn {subscriber, _monitor} -> send(subscriber, message) end)
+      :error -> logger.warn "{:channel, #{channel}} was not subscribed."
+    end
 
     state
   end
@@ -325,9 +326,10 @@ defmodule Redix.PubSub.Connection do
        ]) do
     message = message(:pmessage, %{channel: channel, pattern: pattern, payload: payload})
 
-    subscriptions
-    |> Map.fetch!({:pattern, pattern})
-    |> Enum.each(fn {subscriber, _monitor} -> send(subscriber, message) end)
+    case Map.fetch(subscriptions, {:channel, channel}) do
+      {:ok, users} -> Enum.each(users, fn {subscriber, _monitor} -> send(subscriber, message) end)
+      :error -> logger.warn "{:channel, #{channel}} was not subscribed."
+    end
 
     state
   end
