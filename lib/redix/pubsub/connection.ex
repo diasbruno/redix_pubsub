@@ -312,7 +312,7 @@ defmodule Redix.PubSub.Connection do
 
     case Map.fetch(subscriptions, {:channel, channel}) do
       {:ok, users} -> Enum.each(users, fn {subscriber, _monitor} -> send(subscriber, message) end)
-      :error -> logger.warn "{:channel, #{channel}} was not subscribed."
+      :error -> Logger.warn "{:channel, #{channel}} was not subscribed."
     end
 
     state
@@ -328,7 +328,7 @@ defmodule Redix.PubSub.Connection do
 
     case Map.fetch(subscriptions, {:channel, channel}) do
       {:ok, users} -> Enum.each(users, fn {subscriber, _monitor} -> send(subscriber, message) end)
-      :error -> logger.warn "{:channel, #{channel}} was not subscribed."
+      :error -> Logger.warn "{:channel, #{channel}} was not subscribed."
     end
 
     state
