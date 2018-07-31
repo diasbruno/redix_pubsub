@@ -17,15 +17,18 @@ defmodule Redix.PubSub.Connection do
             # `{:channel, "foo"}` or `{:pattern, "foo*"}` and `recipient_pids` is a
             # map of pids of recipients to their monitor ref for that
             # channel/pattern.
-            subscriptions: %{}
+            subscriptions: nil
 
   @backoff_exponent 1.5
 
   ## Callbacks
 
   def init(opts) do
-    state = %__MODULE__{opts: opts}
-
+    state = %__MODULE__{opts: opts,
+                        subscriptions: :ets.new(:subscriptions, [:set,
+                                                                 write_concurrency: true,
+                                                                 read_concurrency: true])}
+    
     if opts[:sync_connect] do
       sync_connect(state)
     else
@@ -90,7 +93,7 @@ defmodule Redix.PubSub.Connection do
     if state.opts[:exit_on_disconnection] do
       {:stop, reason, state}
     else
-      for {_target, subscribers} <- state.subscriptions,
+      for {_target, subscribers} <- :ets.tab2list(state.subscriptions),
           {subscriber, _monitor} <- subscribers do
         send(subscriber, message(:disconnected, %{error: error}))
       end
@@ -213,41 +216,24 @@ defmodule Redix.PubSub.Connection do
         :psubscribe -> :psubscribed
       end
 
-    {targets_to_subscribe_to, subscriptions} =
-      Enum.flat_map_reduce(targets, subscriptions, fn target, acc ->
-        {target_type, _} = key = key_for_target(kind, target)
+    Enum.map(targets, fn channel ->
+      case :ets.lookup(state.subscriptions, channel) do
+        [] -> :ets.insert(state.subscriptions, {channel, [{Process.monitor(subscriber), subscriber}]})
+        [{channel, pids}] -> :ets.update_element(state.subscriptions, channel, pids ++ [{Process.monitor(subscriber), subscriber}])
+      end
 
-        {targets_to_subscribe_to, for_target} =
-          case Map.get(acc, key, %{}) do
-            for_target when map_size(for_target) == 0 ->
-              {[target], for_target}
-
-            for_target ->
-              {[], for_target}
-          end
-
-        for_target =
-          Map.put_new_lazy(for_target, subscriber, fn -> Process.monitor(subscriber) end)
-
-        acc = Map.put(acc, key, for_target)
-        send(subscriber, message(msg_kind, %{target_type => target}))
-        {targets_to_subscribe_to, acc}
-      end)
-
-    state = %{state | subscriptions: subscriptions}
-
-    if targets_to_subscribe_to == [] do
-      {:noreply, state}
-    else
+      # @TODO: REVIEW LATER
+      send(subscriber, message(msg_kind, %{target_type => target}))
+      
       redis_command =
-        case kind do
-          :subscribe -> "SUBSCRIBE"
-          :psubscribe -> "PSUBSCRIBE"
-        end
+      case kind do
+        :subscribe -> "SUBSCRIBE"
+        :psubscribe -> "PSUBSCRIBE"
+      end
 
       command = Protocol.pack([redis_command | targets_to_subscribe_to])
       send_noreply_or_disconnect(state, command)
-    end
+    end)
   end
 
   defp register_unsubscription(%{subscriptions: subscriptions} = state, kind, targets, subscriber) do
@@ -310,10 +296,9 @@ defmodule Redix.PubSub.Connection do
   defp handle_pubsub_msg(%{subscriptions: subscriptions} = state, ["message", channel, payload]) do
     message = message(:message, %{channel: channel, payload: payload})
 
-    case Map.fetch(subscriptions, {:channel, channel}) do
-      {:ok, users} -> Enum.each(users, fn {subscriber, _monitor} -> send(subscriber, message) end)
-      :error -> Logger.warn "{:channel, #{channel}} was not subscribed."
-    end
+    subscriptions
+    |> Map.fetch!({:channel, channel})
+    |> Enum.each(fn {subscriber, _monitor} -> send(subscriber, message) end)
 
     state
   end
@@ -326,10 +311,9 @@ defmodule Redix.PubSub.Connection do
        ]) do
     message = message(:pmessage, %{channel: channel, pattern: pattern, payload: payload})
 
-    case Map.fetch(subscriptions, {:channel, channel}) do
-      {:ok, users} -> Enum.each(users, fn {subscriber, _monitor} -> send(subscriber, message) end)
-      :error -> Logger.warn "{:channel, #{channel}} was not subscribed."
-    end
+    subscriptions
+    |> Map.fetch!({:pattern, pattern})
+    |> Enum.each(fn {subscriber, _monitor} -> send(subscriber, message) end)
 
     state
   end
