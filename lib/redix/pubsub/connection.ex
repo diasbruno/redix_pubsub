@@ -138,38 +138,10 @@ defmodule Redix.PubSub.Connection do
   end
 
   def handle_info({:DOWN, ref, :process, pid, _reason}, %{subscriptions: subscriptions} = state) do
-    {targets_to_unsubscribe_from, subscriptions} =
-      Enum.flat_map_reduce(subscriptions, subscriptions, fn {key, subscribers}, acc ->
-        subscribers =
-          case Map.pop(subscribers, pid) do
-            {^ref, new_subscribers} -> new_subscribers
-            {_, subscribers} -> subscribers
-          end
-
-        acc = Map.put(acc, key, subscribers)
-
-        if map_size(subscribers) == 0 do
-          {[key], Map.delete(acc, key)}
-        else
-          {[], acc}
-        end
-      end)
-
-    state = %{state | subscriptions: subscriptions}
-
-    if targets_to_unsubscribe_from == [] do
-      {:noreply, state}
-    else
-      {channels, patterns} =
-        enum_split_with(targets_to_unsubscribe_from, &match?({:channel, _}, &1))
-
-      commands = [
-        Protocol.pack(["UNSUBSCRIBE" | Enum.map(channels, fn {:channel, channel} -> channel end)]),
-        Protocol.pack(["PUNSUBSCRIBE" | Enum.map(patterns, fn {:pattern, pattern} -> pattern end)])
-      ]
-
-      send_noreply_or_disconnect(state, commands)
-    end
+    :ets.foldl(fn ({channel, pids}, acc) ->
+      new_pids = pids |> Enum.filter(fn ({r, p}) -> p != pid)
+      :ets.update_element(subscriptions, channel, new_pids)
+    end, nil, subscriptions)
   end
 
   ## Helper functions
