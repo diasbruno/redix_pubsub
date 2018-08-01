@@ -212,8 +212,8 @@ defmodule Redix.PubSub.Connection do
     Enum.map(targets, fn channel ->
       case :ets.lookup(subscriptions, channel) do
         [] -> nil
-        ls ->
-          Enum.map(ls, fn ({ref, _pids}) -> Process.demonitor(ref))
+        [{channel, pids}] ->
+          Enum.map(pids, fn ({ref, _pids}) -> Process.demonitor(ref))
           :ets.update_element(subscriptions, channel, [])
       end
     end)
@@ -229,7 +229,7 @@ defmodule Redix.PubSub.Connection do
 
     case :ets.lookup(subscriptions, channel) do
       [] -> Logger.warn "{:channel, #{channel}} was not subscribed."
-      ls -> Enum.each(ls, fn {_ref, pid} -> send(pid, message) end)
+      [{channel, pids}] -> Enum.each(pids, fn {_ref, pid} -> send(pid, message) end)
     end
 
     state
@@ -245,7 +245,7 @@ defmodule Redix.PubSub.Connection do
 
     case :ets.lookup(subscriptions, channel) do
       [] -> Logger.warn "{:channel, #{channel}} was not subscribed."
-      ls -> Enum.each(ls, fn {_ref, pid} -> send(pid, message) end)
+      [{channel, pids}] -> Enum.each(pids, fn {_ref, pid} -> send(pid, message) end)
      
     end
 
