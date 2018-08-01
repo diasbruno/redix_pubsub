@@ -140,7 +140,7 @@ defmodule Redix.PubSub.Connection do
 
   def handle_info({:DOWN, ref, :process, pid, _reason}, %{subscriptions: subscriptions} = state) do
     :ets.foldl(fn ({channel, pids}, acc) ->
-      new_pids = pids |> Enum.filter(fn ({r, p}) -> p != pid)
+      new_pids = pids |> Enum.filter(fn ({r, p}) -> p != pid end)
       :ets.update_element(subscriptions, channel, new_pids)
     end, nil, subscriptions)
   end
@@ -190,21 +190,25 @@ defmodule Redix.PubSub.Connection do
       end
 
     Enum.map(targets, fn channel ->
-      case :ets.lookup(state.subscriptions, channel) do
-        [] -> :ets.insert(state.subscriptions, {channel, [{Process.monitor(subscriber), subscriber}]})
-        [{channel, pids}] -> :ets.update_element(state.subscriptions, channel, pids ++ [{Process.monitor(subscriber), subscriber}])
-      end
+      has_channel = case :ets.lookup(state.subscriptions, channel) do
+                      [] -> :ets.insert(state.subscriptions, {channel, [{Process.monitor(subscriber), subscriber}]})
+                      false
+                      [{channel, pids}] -> :ets.update_element(state.subscriptions, channel, pids ++ [{Process.monitor(subscriber), subscriber}])
+                        true
+                    end
 
-      send(subscriber, message(msg_kind, %{target_type => target}))
-      
-      redis_command =
+      send(subscriber, message(msg_kind, %{:subscribed => channel}))
+
+      unless has_channel do
+        redis_command =
       case kind do
         :subscribe -> "SUBSCRIBE"
         :psubscribe -> "PSUBSCRIBE"
       end
 
-      command = Protocol.pack([redis_command | targets_to_subscribe_to])
-      send_noreply_or_disconnect(state, command)
+        command = Protocol.pack([redis_command | [channel]])
+        send_noreply_or_disconnect(state, command)
+      end
     end)
   end
 
@@ -213,7 +217,7 @@ defmodule Redix.PubSub.Connection do
       case :ets.lookup(subscriptions, channel) do
         [] -> nil
         [{channel, pids}] ->
-          Enum.map(pids, fn ({ref, _pids}) -> Process.demonitor(ref))
+          Enum.map(pids, fn ({ref, _pids}) -> Process.demonitor(ref) end)
           :ets.update_element(subscriptions, channel, [])
       end
     end)
