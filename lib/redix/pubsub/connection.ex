@@ -93,11 +93,12 @@ defmodule Redix.PubSub.Connection do
     if state.opts[:exit_on_disconnection] do
       {:stop, reason, state}
     else
-      for {_target, subscribers} <- :ets.tab2list(state.subscriptions),
-          {subscriber, _monitor} <- subscribers do
-        send(subscriber, message(:disconnected, %{error: error}))
-      end
-
+      :ets.foldl(fn ({channel, pids}, acc) ->
+        Enum.each(pids, fn ({_ref, pid}) ->
+          send(pid, message(:disconnected, %{error: error}))
+        end)
+      end, nil, state.subscriptions)
+      
       state = %{
         state
         | socket: nil,
@@ -194,7 +195,6 @@ defmodule Redix.PubSub.Connection do
         [{channel, pids}] -> :ets.update_element(state.subscriptions, channel, pids ++ [{Process.monitor(subscriber), subscriber}])
       end
 
-      # @TODO: REVIEW LATER
       send(subscriber, message(msg_kind, %{target_type => target}))
       
       redis_command =
