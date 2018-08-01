@@ -262,12 +262,6 @@ defmodule Redix.PubSub.Connection do
     end
   end
 
-  defp key_for_target(kind, target) when kind in [:subscribe, :unsubscribe],
-    do: {:channel, target}
-
-  defp key_for_target(kind, target) when kind in [:psubscribe, :punsubscribe],
-    do: {:pattern, target}
-
   defp message(kind, properties) when is_atom(kind) and is_map(properties) do
     {:redix_pubsub, self(), kind, properties}
   end
@@ -283,42 +277,13 @@ defmodule Redix.PubSub.Connection do
   end
 
   defp resubscribe_after_reconnection(%{subscriptions: subscriptions} = state) do
-    Enum.each(subscriptions, fn {{kind, target}, subscribers} ->
-      msg_kind =
-        case kind do
-          :channel -> :subscribed
-          :pattern -> :psubscribed
-        end
+    channels = :ets.foldl(fn ({channel, pids}, acc) ->
+      [channel | acc]
+    end, [], subscriptions)
 
-      subscribers
-      |> Map.keys()
-      |> Enum.each(fn pid -> send(pid, message(msg_kind, %{kind => target})) end)
-    end)
-
-    {channels, patterns} = enum_split_with(subscriptions, &match?({{:channel, _}, _}, &1))
-    channels = Enum.map(channels, fn {{:channel, channel}, _} -> channel end)
-    patterns = Enum.map(patterns, fn {{:pattern, pattern}, _} -> pattern end)
-
-    redis_command = []
-
-    redis_command =
-      if channels != [] do
-        redis_command ++ [["SUBSCRIBE" | channels]]
-      else
-        redis_command
-      end
-
-    redis_command =
-      if patterns != [] do
-        redis_command ++ [["PSUBSCRIBE" | patterns]]
-      else
-        redis_command
-      end
-
-    if redis_command == [] do
-      :ok
-    else
-      :gen_tcp.send(state.socket, Enum.map(redis_command, &Protocol.pack/1))
+    case channels == [] do
+      true -> nil
+      false -> :gen_tcp.send(state.socket, Enum.map([["SUBSCRIBE" | channels]], &Protocol.pack/1))
     end
   end
 
