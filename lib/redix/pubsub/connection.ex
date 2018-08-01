@@ -209,55 +209,14 @@ defmodule Redix.PubSub.Connection do
   end
 
   defp register_unsubscription(%{subscriptions: subscriptions} = state, kind, targets, subscriber) do
-    msg_kind =
-      case kind do
-        :unsubscribe -> :unsubscribed
-        :punsubscribe -> :punsubscribed
+    Enum.map(targets, fn channel ->
+      case :ets.lookup(subscriptions, channel) do
+        [] -> nil
+        ls ->
+          Enum.map(ls, fn ({ref, _pids}) -> Process.demonitor(ref))
+          :ets.update_element(subscriptions, channel, [])
       end
-
-    {targets_to_unsubscribe_from, subscriptions} =
-      Enum.flat_map_reduce(targets, subscriptions, fn target, acc ->
-        {target_type, _} = key = key_for_target(kind, target)
-        send(subscriber, message(msg_kind, %{target_type => target}))
-
-        if for_target = Map.get(acc, key) do
-          case Map.pop(for_target, subscriber) do
-            {ref, new_for_target} when is_reference(ref) ->
-              Process.demonitor(ref)
-              flush_monitor_messages(ref)
-
-              targets_to_unsubscribe_from =
-                if map_size(new_for_target) == 0 do
-                  [target]
-                else
-                  []
-                end
-
-              acc = Map.put(acc, key_for_target(kind, target), new_for_target)
-              {targets_to_unsubscribe_from, acc}
-
-            {nil, _} ->
-              {[], acc}
-          end
-        else
-          {[], acc}
-        end
-      end)
-
-    state = %{state | subscriptions: subscriptions}
-
-    if targets_to_unsubscribe_from == [] do
-      {:noreply, state}
-    else
-      redis_command =
-        case kind do
-          :unsubscribe -> "UNSUBSCRIBE"
-          :punsubscribe -> "PUNSUBSCRIBE"
-        end
-
-      command = Protocol.pack([redis_command | targets_to_unsubscribe_from])
-      send_noreply_or_disconnect(state, command)
-    end
+    end)
   end
 
   defp handle_pubsub_msg(state, [operation, _target, _count])
