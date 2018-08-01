@@ -243,9 +243,10 @@ defmodule Redix.PubSub.Connection do
        ]) do
     message = message(:pmessage, %{channel: channel, pattern: pattern, payload: payload})
 
-    case Map.fetch(subscriptions, {:channel, channel}) do
-      {:ok, users} -> Enum.each(users, fn {subscriber, _monitor} -> send(subscriber, message) end)
-      :error -> Logger.warn "{:channel, #{channel}} was not subscribed."
+    case :ets.lookup(subscriptions, channel) do
+      [] -> Logger.warn "{:channel, #{channel}} was not subscribed."
+      ls -> Enum.each(ls, fn {_ref, pid} -> send(pid, message) end)
+     
     end
 
     state
