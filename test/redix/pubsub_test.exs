@@ -36,42 +36,6 @@ defmodule Redix.PubSubTest do
     assert_receive {:redix_pubsub, ^ps, :message, %{channel: "bar", payload: "world"}}
   end
 
-  test "psubscribe/punsubscribe flow", %{conn: ps} do
-    {:ok, c} = Redix.start_link()
-
-    PubSub.psubscribe(ps, ["foo*", "ba?"], self())
-    assert_receive {:redix_pubsub, ^ps, :psubscribed, %{pattern: "foo*"}}
-    assert_receive {:redix_pubsub, ^ps, :psubscribed, %{pattern: "ba?"}}
-
-    Redix.pipeline!(c, [
-      ~w(PUBLISH foo_1 foo_1),
-      ~w(PUBLISH foo_2 foo_2),
-      ~w(PUBLISH bar bar),
-      ~w(PUBLISH barfoo barfoo)
-    ])
-
-    assert_receive {:redix_pubsub, ^ps, :pmessage,
-                    %{payload: "foo_1", channel: "foo_1", pattern: "foo*"}}
-
-    assert_receive {:redix_pubsub, ^ps, :pmessage,
-                    %{payload: "foo_2", channel: "foo_2", pattern: "foo*"}}
-
-    assert_receive {:redix_pubsub, ^ps, :pmessage,
-                    %{payload: "bar", channel: "bar", pattern: "ba?"}}
-
-    refute_receive {:redix_pubsub, ^ps, :pmessage, %{payload: "barfoo"}}
-
-    PubSub.punsubscribe(ps, "foo*", self())
-    assert_receive {:redix_pubsub, ^ps, :punsubscribed, %{pattern: "foo*"}}
-
-    Redix.pipeline!(c, [~w(PUBLISH foo_x foo_x), ~w(PUBLISH baz baz)])
-
-    refute_receive {:redix_pubsub, ^ps, :pmessage, %{payload: "foo_x"}}
-
-    assert_receive {:redix_pubsub, ^ps, :pmessage,
-                    %{payload: "baz", channel: "baz", pattern: "ba?"}}
-  end
-
   test "subscribing the same pid to the same channel more than once has no effect", %{conn: ps} do
     {:ok, c} = Redix.start_link()
 
