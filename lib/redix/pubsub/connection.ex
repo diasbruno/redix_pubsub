@@ -9,6 +9,8 @@ defmodule Redix.PubSub.Connection do
 
   require Logger
 
+  @compile { :ms_pattern }
+
   defstruct opts: nil,
             socket: nil,
             continuation: nil,
@@ -25,7 +27,7 @@ defmodule Redix.PubSub.Connection do
 
   def init(opts) do
     state = %__MODULE__{opts: opts,
-                        subscriptions: :ets.new(:subscriptions, [:set,
+                        subscriptions: :ets.new(:subscriptions, [:duplicate_bag,
                                                                  write_concurrency: true,
                                                                  read_concurrency: true])}
     
@@ -42,14 +44,15 @@ defmodule Redix.PubSub.Connection do
         state = %{state | socket: socket}
 
         if info == :backoff do
-          log(state, :reconnection, ["Reconnected to Redis (", Utils.format_host(state), ?)])
+          log(state, :reconnection, ["Reconnected to Redis (", Utils.format_host(state), "?)"])
 
           case resubscribe_after_reconnection(state) do
             :ok ->
               {:ok, state}
-
             {:error, reason} ->
               {:disconnect, {:error, %ConnectionError{reason: reason}}, state}
+            nil ->
+              {:ok, state}
           end
         else
           {:ok, state}
@@ -93,10 +96,8 @@ defmodule Redix.PubSub.Connection do
     if state.opts[:exit_on_disconnection] do
       {:stop, reason, state}
     else
-      :ets.foldl(fn ({channel, pids}, acc) ->
-        Enum.each(pids, fn ({_ref, pid}) ->
-          send(pid, message(:disconnected, %{error: error}))
-        end)
+      :ets.foldl(fn ({channel, {r, p}}, acc) ->
+        send(p, message(:disconnected, %{error: error}))
       end, nil, state.subscriptions)
       
       state = %{
@@ -139,10 +140,8 @@ defmodule Redix.PubSub.Connection do
   end
 
   def handle_info({:DOWN, ref, :process, pid, _reason}, %{subscriptions: subscriptions} = state) do
-    :ets.foldl(fn ({channel, pids}, acc) ->
-      new_pids = pids |> Enum.filter(fn ({r, p}) -> p != pid end)
-      :ets.insert(subscriptions, {channel, new_pids})
-    end, nil, subscriptions)
+    ms = [{{:"$1", {:"$2", :"$3"}}, [{:==, :"$3", pid}], [:"$_"]}]
+    :ets.select_delete subscriptions, ms
     {:noreply, state}
   end
 
@@ -191,28 +190,20 @@ defmodule Redix.PubSub.Connection do
       end
 
     Enum.map(targets, fn channel ->
-      has_channel = case :ets.lookup(state.subscriptions, channel) do
+      ms = [{{:"$1", {:"$2", :"$3"}}, [{:==, :"$1", channel}, {:==, :"$3", subscriber}], [:"$_"]}]
+      has_channel = case :ets.select subscriptions, ms do
                       [] ->
-                        :ets.insert(state.subscriptions, {channel, [{Process.monitor(subscriber), subscriber}]})
-                        send(subscriber, message(msg_kind, %{:channel => channel}))
-                      false
-                      [{channel, pids}] ->
-                          case Enum.find(pids, fn ({ref, pid}) -> pid == subscriber end) do
-                            nil ->
-                              :ets.insert(state.subscriptions,
-                                {channel, (pids ++ [{Process.monitor(subscriber), subscriber}])})
-                              send(subscriber, message(msg_kind, %{:channel => channel}))
-                            ({ref, pid}) -> send(subscriber, message(msg_kind, %{:channel => channel}))
-                          end
-                        true
+                        :ets.insert(subscriptions, {channel, {Process.monitor(subscriber), subscriber}})
+                        false
+                      xs -> true
                     end
-
+      send(subscriber, message(msg_kind, %{:channel => channel}))
       unless has_channel do
         redis_command =
-      case kind do
-        :subscribe -> "SUBSCRIBE"
-        :psubscribe -> "PSUBSCRIBE"
-      end
+          case kind do
+            :subscribe -> "SUBSCRIBE"
+            :psubscribe -> "PSUBSCRIBE"
+          end
 
         command = Protocol.pack([redis_command | [channel]])
         send_noreply_or_disconnect(state, command)
@@ -229,24 +220,20 @@ defmodule Redix.PubSub.Connection do
         :punsubscribe -> :punsubscribed
       end
     Enum.map(targets, fn channel ->
-      case :ets.lookup(subscriptions, channel) do
-        [] -> nil
-        [{channel, pids}] ->
-          case Enum.find(pids, fn ({ref, pid}) -> pid == subscriber end) do
-            nil -> nil
-            ({ref, pid}) ->
-              Process.demonitor(ref)
-              send(pid, message(msg_kind, %{:channel => channel}))
-              :ets.insert(subscriptions, {channel, List.delete(pids, {ref, pid})})
-          end
-      end
+      ms = [{{:"$1", {:"$2", :"$3"}}, [{:==, :"$1", channel}, {:==, :"$3", subscriber}], [:"$_"]}]
+      to_delete = :ets.select subscriptions, ms
+      Enum.each(to_delete, fn ({channel, {ref, pid}}) ->
+        Process.demonitor(ref)
+        send(pid, message(msg_kind, %{:channel => channel}))
+        :ets.match_delete subscriptions, {channel, {ref, pid}}
+      end)
     end)
 
     {:noreply, state}
   end
 
   defp handle_pubsub_msg(state, [operation, _target, _count])
-       when operation in ~w(subscribe psubscribe unsubscribe punsubscribe) do
+  when operation in ~w(subscribe psubscribe unsubscribe punsubscribe) do
     state
   end
 
@@ -255,7 +242,8 @@ defmodule Redix.PubSub.Connection do
 
     case :ets.lookup(subscriptions, channel) do
       [] -> Logger.warn "{:channel, #{channel}} was not subscribed."
-      [{channel, pids}] -> Enum.each(pids, fn {_ref, pid} -> send(pid, message) end)
+      xs ->
+        Enum.each(xs, fn {c, {ref, pid}} -> send(pid, message) end)
     end
 
     state
@@ -271,8 +259,7 @@ defmodule Redix.PubSub.Connection do
 
     case :ets.lookup(subscriptions, channel) do
       [] -> Logger.warn "{:channel, #{channel}} was not subscribed."
-      [{channel, pids}] -> Enum.each(pids, fn {_ref, pid} -> send(pid, message) end)
-     
+      xs -> Enum.each(xs, fn {c, {ref, pid}} -> send(pid, message) end)
     end
 
     state
@@ -303,13 +290,12 @@ defmodule Redix.PubSub.Connection do
   end
 
   defp resubscribe_after_reconnection(%{subscriptions: subscriptions} = state) do
-    channels = :ets.foldl(fn ({channel, pids}, acc) ->
-      Enum.each(pids, fn ({_ref, pid}) ->
-        send(pid, message(:subscribed, %{channel: channel}))
-      end)
-      [channel | acc]
-    end, [], subscriptions)
-
+    channels = :ets.foldl(fn ({channel, {ref, pid}}, acc) ->
+      send(pid, message(:subscribed, %{channel: channel}))
+      acc = MapSet.put(acc, channel)
+      acc
+    end, MapSet.new(), subscriptions) |> MapSet.to_list
+    
     case channels == [] do
       true -> nil
       false -> :gen_tcp.send(state.socket, Enum.map([["SUBSCRIBE" | channels]], &Protocol.pack/1))
